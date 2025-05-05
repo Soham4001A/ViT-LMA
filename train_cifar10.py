@@ -23,12 +23,23 @@ import pandas as pd
 import csv
 import time
 
-from models import *
+from models import * # Assuming this imports necessary model definitions like ResNets etc.
 from utils import progress_bar
 from randomaug import RandAugment
-from models.vit import ViT
+from models.vit import ViT_LMA, ViT # Import both standard ViT and ViT_LMA
 from models.convmixer import ConvMixer
-from models.mobilevit import mobilevit_xxs
+from models.mobilevit import mobilevit_xxs # Assuming you have this file/class
+from omegaconf import OmegaConf # Make sure OmegaConf is installed and imported
+from torchsummary import summary as pytorch_summary_call
+from optim.sgd import DAG
+
+# Import torchinfo
+try:
+    import torchinfo
+    has_torchinfo = True
+except ImportError:
+    has_torchinfo = False
+    print("torchinfo not found. Install with 'pip install torchinfo' to get model summaries.")
 
 # parsers
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10/100 Training')
@@ -56,7 +67,7 @@ usewandb = ~args.nowandb
 if usewandb:
     import wandb
     watermark = "{}_lr{}_{}".format(args.net, args.lr, args.dataset)
-    wandb.init(project="cifar-challenge",
+    wandb.init(project="cifar-challenge", # Replace with your project name if needed
             name=watermark)
     wandb.config.update(args)
 
@@ -106,7 +117,7 @@ transform_test = transforms.Compose([
 ])
 
 # Add RandAugment with N, M(hyperparameter)
-if aug:  
+if aug:
     N = 2; M = 14;
     transform_train.transforms.insert(0, RandAugment(N, M))
 
@@ -164,7 +175,7 @@ elif args.net=="vit_small":
     emb_dropout = 0.1
 )
 elif args.net=="vit_tiny":
-    from models.vit_small import ViT
+    from models.vit_small import ViT # Assuming vit_small.py contains the ViT class
     net = ViT(
     image_size = size,
     patch_size = args.patch,
@@ -189,17 +200,69 @@ elif args.net=="simplevit":
 )
 elif args.net=="vit":
     # ViT for cifar10/100
-    net = ViT(
-    image_size = size,
-    patch_size = args.patch,
-    num_classes = num_classes,
-    dim = int(args.dimhead),
-    depth = 6,
-    heads = 8,
-    mlp_dim = 512,
-    dropout = 0.1,
-    emb_dropout = 0.1
-)
+    net = ViT( # Use the standard ViT imported from models.vit
+        image_size = size,
+        patch_size = args.patch,
+        num_classes = num_classes,
+        dim = int(args.dimhead),
+        depth = 6,
+        heads = 8,
+        mlp_dim = 512,
+        dropout = 0.1,
+        emb_dropout = 0.1
+    )
+# Note: Duplicate elif args.net=="vit" was removed here. Keep only one.
+elif args.net=="vit_lma": # Changed name to distinguish
+    # ViT_LMA for cifar10/100
+    print("Using ViT_LMA model.") # Added print statement
+    # --- Define LMA Configuration ---
+    try:
+        # Example values, replace with your actual config source (e.g., add more args)
+        latent_dim_d_new = int(args.dimhead) // 2 # Example: Half of original dim
+        num_heads_stacking = 32 # Example hyperparameter - Consider adding an arg for this
+        num_heads_latent = 8   # Example hyperparameter (must divide latent_dim_d_new) - Consider adding arg
+        target_l_new = 16 # Example: Let LMA calculate based on S=num_patches+1
+        ff_latent_hidden = latent_dim_d_new * 4 # Example: Standard expansion in latent space
+        qkv_bias_lma = True                    # Example setting
+        
+        # # Example values, replace with your actual config source (e.g., add more args)
+        # latent_dim_d_new = int(args.dimhead) // 2 # Example: Half of original dim
+        # num_heads_stacking = 8 # Example hyperparameter - Consider adding an arg for this
+        # num_heads_latent = 4   # Example hyperparameter (must divide latent_dim_d_new) - Consider adding arg
+        # target_l_new = 65 # Example: Let LMA calculate based on S=num_patches+1
+        # ff_latent_hidden = latent_dim_d_new * 4 # Example: Standard expansion in latent space
+        # qkv_bias_lma = False      
+
+        lma_config_dict = {
+            'd_new': latent_dim_d_new,
+            'num_heads_stacking': num_heads_stacking,
+            'num_heads_latent': num_heads_latent,
+            'target_l_new': target_l_new,
+            'ff_latent_hidden': ff_latent_hidden,
+            'qkv_bias': qkv_bias_lma,
+            # Note: static_seq_len and dropout_prob are set inside ViT_LMA.__init__
+        }
+        lma_cfg = OmegaConf.create(lma_config_dict)
+        print(f"  LMA Config: {OmegaConf.to_yaml(lma_cfg)}") # Print LMA config for verification
+
+        # --- Instantiate ViT_LMA ---
+        net = ViT_LMA(
+            image_size = size,
+            patch_size = args.patch,
+            num_classes = num_classes,
+            dim = int(args.dimhead), # Original embedding dimension (d_0)
+            depth = 6,               # Number of *LatentLayer* blocks
+            lma_cfg = lma_cfg,       # Pass the LMA configuration
+            pool = 'cls',            # Or 'mean'
+            dropout = 0.1,           # Main dropout (also used inside LMA)
+            emb_dropout = 0.1
+        )
+    except Exception as e:
+        print(f"Error creating ViT_LMA model: {e}")
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
+        exit() # Exit if model creation fails
+
 elif args.net=="vit_timm":
     import timm
     net = timm.create_model("vit_base_patch16_384", pretrained=True)
@@ -244,23 +307,176 @@ elif args.net=="mobilevit":
 else:
     raise ValueError(f"'{args.net}' is not a valid model")
 
+
+print("Attempting manual forward pass...") # Sanity Check
+try:
+    input_summary_size = (1, 3, size, size) # Use batch size 1 for summary
+    # Ensure model and dummy input are on the same device BEFORE the forward pass
+    current_device = next(net.parameters()).device # Get device model is actually on
+    print(f"  Model device: {current_device}")
+    dummy_input = torch.randn(input_summary_size).to(current_device)
+    print(f"  Dummy input shape: {dummy_input.shape}, device: {dummy_input.device}")
+    net.eval() # Set to eval mode for consistency
+    with torch.no_grad():
+         output = net(dummy_input)
+    print(f"Manual forward pass successful. Output shape: {output.shape}")
+    net.train() # Set back to train mode if needed
+except Exception as e_manual:
+    print(f"Manual forward pass FAILED: {e_manual}")
+    import traceback
+    traceback.print_exc()
+    
+# -------- MODEL SUMMARY --------
+
+try:
+    from torchsummary import summary as pytorch_summary_call
+    has_pytorch_summary = True
+except ImportError:
+    has_pytorch_summary = False
+    
+# First, try pytorch-summary if available
+if has_pytorch_summary:
+    print('\n==> Model Summary (using pytorch-summary)...')
+    try:
+        # pytorch-summary expects (channels, height, width)
+        input_shape_pytorch_summary = (3, size, size)
+
+        # Determine device model is on
+        if next(net.parameters(), None) is not None:
+            current_device = next(net.parameters()).device
+        else:
+            current_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Ensure model is on the correct device before summary
+        net.to(current_device)
+
+        # Call pytorch-summary
+        pytorch_summary_call(net, input_size=input_shape_pytorch_summary, device=str(current_device))
+        summary_printed = True # Flag that we succeeded
+
+    except Exception as e_pytorch_summary:
+        print(f"pytorch-summary failed: {e_pytorch_summary}")
+        print("Will attempt torchinfo if available, or basic count.")
+        summary_printed = False # Flag that we failed
+
+if has_torchinfo:
+    print('\n==> Model Summary (using torchinfo - simplified)...')
+    try:
+        input_summary_size_ti = (1, 3, size, size)
+        # VERY basic call
+        torchinfo.summary(net, input_size=input_summary_size_ti, verbose=1)
+    except Exception as e_ti:
+        print(f"Simplified torchinfo call failed: {e_ti}")
+        
+# If pytorch-summary wasn't available OR it failed, try torchinfo
+elif has_torchinfo: # Use elif here
+    print('\n==> Model Summary (using torchinfo)...')
+    try:
+        # Define the input size for torchinfo
+        input_summary_size_ti = (1, 3, size, size) # (batch, channels, height, width)
+
+        # Determine device model is on (redundant if pytorch-summary was tried, but safe)
+        if next(net.parameters(), None) is not None:
+            current_device = next(net.parameters()).device
+        else:
+            current_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Ensure model is on the correct device before summary
+        net.to(current_device)
+
+        # Call torchinfo
+        torchinfo.summary(net,
+                          input_size=input_summary_size_ti,
+                          batch_dim=0,
+                          col_names=["input_size", "output_size", "num_params", "kernel_size", "mult_adds"],
+                          col_width=16,
+                          row_settings=["var_names"],
+                          depth=5,
+                          device=current_device,
+                          verbose=1)
+        summary_printed = True # Flag that we succeeded
+
+    except Exception as e_ti:
+        print(f"Could not print model summary using torchinfo: {e_ti}")
+        print("Will fallback to basic parameter count.")
+        summary_printed = False # Flag that we failed
+
+# Fallback if neither library is available or both failed
+else:
+     summary_printed = False # Neither library was available
+     # Optional: you could add a check here: if not summary_printed: ...
+
+if not summary_printed: # If no summary was printed by either library
+    print("\n==> Model Summary (Libraries failed or unavailable, using basic count)...")
+    try:
+        total_params = sum(p.numel() for p in net.parameters())
+        trainable_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+        print(f"  Total Parameters: {total_params:,}")
+        print(f"  Trainable Parameters: {trainable_params:,}")
+    except Exception as e_manual:
+        print(f"Could not even count parameters manually: {e_manual}")
+
+# -------------------------------------------
+
+net = net.to(device) # Use the main script device variable 'device' here
+
 # For Multi-GPU
 if 'cuda' in device:
-    print(device)
+    print(f"Using device: {device}")
     if args.dp:
-        print("using data parallel")
-        net = torch.nn.DataParallel(net) # make parallel
+        print("Using Data Parallel")
+        net = torch.nn.DataParallel(net) # make parallel AFTER summary
         cudnn.benchmark = True
 
 if args.resume:
     # Load checkpoint.
     print('==> Resuming from checkpoint..')
     assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
-    checkpoint_path = './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch)
-    checkpoint = torch.load(checkpoint_path)
-    net.load_state_dict(checkpoint['net'])
-    best_acc = checkpoint['acc']
-    start_epoch = checkpoint['epoch']
+    checkpoint_path = './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch) # Updated path format
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=device) # Load to correct device
+        # Handle DataParallel state_dict keys
+        if isinstance(net, torch.nn.DataParallel):
+             # If current net is DP, load directly if checkpoint was saved from DP
+             # If checkpoint was NOT from DP, need to load into net.module
+             try:
+                 net.load_state_dict(checkpoint['net'])
+             except RuntimeError: # Likely mismatch (DP vs non-DP)
+                 print("Loading non-DP checkpoint into DP model...")
+                 net.module.load_state_dict(checkpoint['net'])
+        else:
+             # If current net is not DP
+             # If checkpoint WAS from DP, need to load from state_dict['module']
+             # If checkpoint was NOT from DP, load directly
+             if any(key.startswith('module.') for key in checkpoint['net'].keys()):
+                 print("Loading DP checkpoint into non-DP model...")
+                 from collections import OrderedDict
+                 new_state_dict = OrderedDict()
+                 for k, v in checkpoint['net'].items():
+                     name = k[7:] # remove `module.`
+                     new_state_dict[name] = v
+                 net.load_state_dict(new_state_dict)
+             else:
+                 net.load_state_dict(checkpoint['net'])
+
+        # Load optimizer, scaler, etc.
+        if 'optimizer' in checkpoint:
+            try:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+            except Exception as e:
+                 print(f"Warning: Could not load optimizer state: {e}")
+        if 'scaler' in checkpoint and use_amp:
+             try:
+                 scaler.load_state_dict(checkpoint['scaler'])
+             except Exception as e:
+                 print(f"Warning: Could not load AMP scaler state: {e}")
+        best_acc = checkpoint['acc']
+        start_epoch = checkpoint['epoch'] + 1 # Start from next epoch
+        print(f"Resumed from epoch {start_epoch-1} with best_acc {best_acc:.2f}%")
+    else:
+        print(f"Checkpoint path not found: {checkpoint_path}")
+        print("Starting training from scratch.")
+
 
 # Loss is CE
 criterion = nn.CrossEntropyLoss()
@@ -268,8 +484,10 @@ criterion = nn.CrossEntropyLoss()
 if args.opt == "adam":
     optimizer = optim.Adam(net.parameters(), lr=args.lr)
 elif args.opt == "sgd":
-    optimizer = optim.SGD(net.parameters(), lr=args.lr)  
-    
+    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4) # Added common SGD params
+if args.opt == "DAG":
+    optimizer = DAG(net.parameters(), lr=args.lr, momentum=0.9)
+
 # use cosine scheduling
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.n_epochs)
 
@@ -321,13 +539,14 @@ def test(epoch):
 
             progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
                 % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
-    
+
     # Save checkpoint.
     acc = 100.*correct/total
     if acc > best_acc:
         print('Saving..')
         state = {
-            "net": net.state_dict(),
+            # Save module state dict if using DataParallel
+            "net": net.module.state_dict() if isinstance(net, torch.nn.DataParallel) else net.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scaler": scaler.state_dict(),
             "acc": acc,
@@ -335,34 +554,45 @@ def test(epoch):
         }
         if not os.path.isdir('checkpoint'):
             os.mkdir('checkpoint')
-        torch.save(state, './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch))
+        # Consistent checkpoint naming
+        save_path = './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch)
+        torch.save(state, save_path)
+        print(f"Checkpoint saved to {save_path}")
         best_acc = acc
-    
+    else:
+         print(f"Accuracy {acc:.2f}% did not improve from best {best_acc:.2f}%")
+
     os.makedirs("log", exist_ok=True)
-    content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, val loss: {test_loss:.5f}, acc: {(acc):.5f}'
+    content = time.ctime() + ' ' + f'Epoch {epoch}, lr: {optimizer.param_groups[0]["lr"]:.7f}, val loss: {test_loss/(batch_idx+1):.5f}, acc: {acc:.5f}' # Corrected val_loss calculation
     print(content)
     log_file = f'log/log_{args.net}_{args.dataset}_patch{args.patch}.txt'
     with open(log_file, 'a') as appender:
         appender.write(content + "\n")
-    return test_loss, acc
+    return test_loss/(batch_idx+1), acc # Return average loss
+
 
 list_loss = []
 list_acc = []
 
 if usewandb:
     wandb.watch(net)
-    
-net.cuda()
+
+# It's often better to move the net to cuda *before* defining the optimizer
+# net = net.to(device) # Moved earlier, before summary and DP wrapping
+
+# Load checkpoint needs to happen *after* model definition and *before* DP/moving to device sometimes
+# The updated resume logic handles device mapping and DP state dicts better.
+
 for epoch in range(start_epoch, args.n_epochs):
     start = time.time()
     trainloss = train(epoch)
     val_loss, acc = test(epoch)
-    
-    scheduler.step(epoch-1) # step cosine scheduling
-    
+
+    scheduler.step() # CosineAnnealingLR typically steps each epoch without epoch arg after PyTorch 1.1.0
+
     list_loss.append(val_loss)
     list_acc.append(acc)
-    
+
     # Log training..
     if usewandb:
         wandb.log({'epoch': epoch, 'train_loss': trainloss, 'val_loss': val_loss, "val_acc": acc, "lr": optimizer.param_groups[0]["lr"],
@@ -372,10 +602,19 @@ for epoch in range(start_epoch, args.n_epochs):
     csv_file = f'log/log_{args.net}_{args.dataset}_patch{args.patch}.csv'
     with open(csv_file, 'w') as f:
         writer = csv.writer(f, lineterminator='\n')
-        writer.writerow(list_loss) 
-        writer.writerow(list_acc) 
-    print(list_loss)
+        writer.writerow(['Epoch'] + list(range(start_epoch, epoch + 1))) # Add header
+        writer.writerow(['Val Loss'] + list_loss)
+        writer.writerow(['Val Acc'] + list_acc)
+    print(f"Best validation accuracy: {best_acc:.2f}%") # Print best accuracy at the end of epoch
 
 # writeout wandb
 if usewandb:
-    wandb.save("wandb_{}_{}.h5".format(args.net, args.dataset))
+    # Saving the best model to wandb might be more useful than the final state
+    best_ckpt_path = './checkpoint/{}-{}-{}-ckpt.t7'.format(args.net, args.dataset, args.patch)
+    if os.path.exists(best_ckpt_path):
+         wandb.save(best_ckpt_path)
+    else:
+         print("Best checkpoint not found for wandb save.")
+    # wandb.save("wandb_{}_{}.h5".format(args.net, args.dataset)) # .h5 is unusual for pytorch
+
+print(f"Finished training. Best validation accuracy: {best_acc:.2f}%")
