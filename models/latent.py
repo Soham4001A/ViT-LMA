@@ -92,9 +92,8 @@ class InitialLatentTransform(torch.nn.Module):
         B, L_new, _ = z_latent.shape
         gate = torch.sigmoid(self.from_latent_gate(z_latent))
         value = self.from_latent(z_latent) # Use the original linear layer for the value
-        # latent -> chunk features
-        chunks_back = gate * value # Element-wise multiplication
-        #chunks_back = self.from_latent(z_latent) * math.sqrt(self.C_new / self.d_new)  # variance preservation back to hidden
+        # Simplified reconstruction: use gated linear projection only
+        chunks_back = gate * value
         flat_back   = chunks_back.reshape(B, -1)              # [B, S*H]
         x_stacked   = flat_back.view(B, self.seq_len * self.nh_stack, self.dk)
         # un‑stack heads

@@ -205,6 +205,12 @@ class ViT_LMA(nn.Module):
         # Use standard LayerNorm for simplicity, adjust if needed via config
         latent_norm_eps = getattr(lma_cfg, 'norm_eps', 1e-5)
         self.final_latent_norm = nn.LayerNorm(latent_dim, eps=latent_norm_eps)
+        # Classification head directly on latent representation
+        self.latent_dim = latent_dim
+        self.latent_head = nn.Sequential(
+            nn.LayerNorm(latent_dim),
+            nn.Linear(latent_dim, num_classes)
+        )
         # --- End LMA Integration ---
 
         self.pool = pool
@@ -240,12 +246,6 @@ class ViT_LMA(nn.Module):
         # Apply final norm in latent space
         z = self.final_latent_norm(z)
 
-        # 3. Inverse Transform Z -> H (Reconstruct token-level features)
-        x_reconstructed = self.latent_front.inverse_transform(z) # [B, n+1, dim]
-
-        # 4. Pooling / CLS Token Extraction (Standard ViT, but on reconstructed features)
-        x_pooled = x_reconstructed.mean(dim = 1) if self.pool == 'mean' else x_reconstructed[:, 0]
-
-        # 5. Final Classification Head (Standard ViT)
-        x_final = self.to_latent(x_pooled) # Usually identity
-        return self.mlp_head(x_final)
+        # 3. Pool latent sequence and classify directly
+        z_pooled = z.mean(dim=1) if self.pool == 'mean' else z[:, 0]
+        return self.latent_head(z_pooled)
