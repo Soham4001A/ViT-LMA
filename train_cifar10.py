@@ -13,6 +13,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 import numpy as np
+import random
 
 import torchvision
 import torchvision.transforms as transforms
@@ -112,7 +113,7 @@ def run_training(model_name, optimizer_name, learning_rate, dataset_name, config
         import wandb
         try:
             wandb.init(
-                project="cifar100-optimizer-comparison", # Changed project name
+                project="cifar100-optimizer-comparison-higher-lr", # Changed project name
                 name=run_id_wandb,
                 config=vars(current_args), # Log effective config for this run
                 reinit=True, # Allow re-initialization in the same process
@@ -567,29 +568,29 @@ if __name__ == "__main__":
     # models_to_test = [base_args.net] # Test only the model passed via --net
     models_to_test = [
         'res18',
-        'vgg',       # Corresponds to VGG19
+        # 'vgg',       # Corresponds to VGG19
         'res34',
         'res50',
         'res101',
-        'convmixer',
-        'mlpmixer',
-        'vit_small', # From models.vit_small
-        'vit_tiny',  # From models.vit_small
-        'simplevit', # From models.simplevit
-        'vit',       # From models.vit (standard ViT)
-        'vit_timm',  # Pretrained timm ViT
-        'cait',      # From models.cait
-        'cait_small',# From models.cait
-        'swin',      # From models.swin
-        'mobilevit', # Assumes mobilevit_xxs specifically
-        'vit_lma'    # Your custom ViT_LMA
+        # 'convmixer',
+        # 'mlpmixer',
+        # 'vit_small', # From models.vit_small
+        # 'vit_tiny',  # From models.vit_small
+        # 'simplevit', # From models.simplevit
+        # 'vit',       # From models.vit (standard ViT)
+        # 'vit_timm',  # Pretrained timm ViT
+        # 'cait',      # From models.cait
+        # 'cait_small',# From models.cait
+        # 'swin',      # From models.swin
+        # 'mobilevit', # Assumes mobilevit_xxs specifically
+        # 'vit_lma'    # Your custom ViT_LMA
     ]
 
     optimizers_config = {
         # Optimizer Name: Learning Rate
-        'DAG': 7e-5,  # Adjust LR as needed
-        'adam': 1e-4, # Adjust LR as needed
-        'sgd': 1e-4   # Adjust LR as needed
+        'DAG': 9e-5,  # Adjust LR as needed
+        # 'adam': 1e-3, # Adjust LR as needed
+        # 'sgd': 1e-1   # Adjust LR as needed
     }
     dataset_to_use = 'cifar100' # Force CIFAR-100
 
